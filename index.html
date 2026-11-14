@@ -148,9 +148,26 @@
     }
 
     .pot { margin-bottom: 12px; color: #f3dfa0; font-weight: 750; }
-    .board { display: flex; justify-content: center; gap: clamp(3px, 1vw, 9px); min-height: 50px; }
+    .board { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); justify-items: start; min-height: 50px; }
     .board .card { width: clamp(37px, 7vw, 52px); height: clamp(51px, 9vw, 70px); font-size: clamp(1rem, 2.4vw, 1.3rem); }
     .street { margin-top: 8px; color: #d3e2d4; font-size: .78rem; }
+    .bet-marker {
+      position: absolute;
+      z-index: 2;
+      padding: 4px 8px;
+      border: 1px solid #f3dfa0;
+      border-radius: 999px;
+      color: #17241b;
+      background: #f3dfa0;
+      font-size: .75rem;
+      font-weight: 800;
+      white-space: nowrap;
+      box-shadow: 0 2px 6px #07130e88;
+    }
+    .bet-0 { left: 50%; bottom: calc(100% + 8px); transform: translateX(-50%); }
+    .bet-1, .bet-2 { left: calc(100% + 8px); top: 50%; transform: translateY(-50%); }
+    .bet-3 { left: 50%; top: calc(100% + 8px); transform: translateX(-50%); }
+    .bet-4, .bet-5 { right: calc(100% + 8px); top: 50%; transform: translateY(-50%); }
 
     .below-table { display: grid; grid-template-columns: minmax(0, 1fr) 260px; gap: 16px; margin-top: 16px; }
     .panel { padding: 14px 16px; border: 1px solid #ffffff1b; border-radius: 12px; background: #14271fdd; }
@@ -223,7 +240,7 @@
           <button id="fold" class="fold" type="button">フォールド</button>
           <button id="call" class="check" type="button">チェック</button>
           <label class="raise-control" for="raise-amount">
-            レイズ額
+            レイズ後の合計ベット額
             <input id="raise-amount" type="number" min="20" step="10" value="20">
           </label>
           <button id="raise" type="button">レイズ</button>
@@ -267,13 +284,33 @@
 
     const $ = (id) => document.getElementById(id);
     const money = (amount) => Math.floor(amount).toLocaleString("ja-JP");
+    const pokerMoney = (amount) => String(Math.floor(amount));
     const livePlayers = () => players.filter((player) => !player.folded && player.hole.length);
     const actingPlayers = () => livePlayers().filter((player) => player.stack > 0);
     const potSize = () => players.reduce((total, player) => total + player.contribution, 0);
 
     function say(message) {
-      game.messages.unshift(message);
-      game.messages = game.messages.slice(0, 5);
+      game.messages.push(message);
+    }
+
+    function pokerCard(card) {
+      const rank = card.rank === 10 ? "T" : RANKS[card.rank];
+      return `${rank}${["c", "d", "h", "s"][card.suit]}`;
+    }
+
+    function pokerCards(cards) {
+      return `[${cards.map(pokerCard).join(" ")}]`;
+    }
+
+    function logHandHeader(stacks) {
+      const now = new Date();
+      const pad = (value) => String(value).padStart(2, "0");
+      const timestamp = `${now.getFullYear()}/${pad(now.getMonth() + 1)}/${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+      say(`PokerStars Hand #${game.handNumber}: Hold'em No Limit ($${pokerMoney(SMALL_BLIND)}/$${pokerMoney(BIG_BLIND)}) - ${timestamp}`);
+      say(`Table '6max' 6-max Seat #${game.dealer + 1} is the button`);
+      for (const player of players) {
+        if (player.hole.length) say(`Seat ${player.index + 1}: ${player.name} ($${pokerMoney(stacks[player.index])} in chips)`);
+      }
     }
 
     function makeDeck() {
@@ -320,6 +357,7 @@
 
       game.handNumber += 1;
       game.sequence += 1;
+      game.messages = [];
       game.deck = makeDeck();
       game.board = [];
       game.street = "preflop";
@@ -351,11 +389,15 @@
 
       const smallBlindSeat = nextSeat(game.dealer, (player) => player.stack > 0);
       const bigBlindSeat = nextSeat(smallBlindSeat, (player) => player.stack > 0);
-      pay(players[smallBlindSeat], SMALL_BLIND);
-      pay(players[bigBlindSeat], BIG_BLIND);
+      const startingStacks = players.map((player) => player.stack);
+      logHandHeader(startingStacks);
+      const smallBlindPaid = pay(players[smallBlindSeat], SMALL_BLIND);
+      const bigBlindPaid = pay(players[bigBlindSeat], BIG_BLIND);
       game.currentBet = Math.max(...players.map((player) => player.streetBet));
-      say(`ハンド ${game.handNumber} 開始。ブラインドは ${money(SMALL_BLIND)} / ${money(BIG_BLIND)}。`);
-      say(`${players[smallBlindSeat].name} がSB、${players[bigBlindSeat].name} がBB。`);
+      say(`${players[smallBlindSeat].name}: posts small blind $${pokerMoney(smallBlindPaid)}`);
+      say(`${players[bigBlindSeat].name}: posts big blind $${pokerMoney(bigBlindPaid)}`);
+      say("*** HOLE CARDS ***");
+      say(`Dealt to あなた ${pokerCards(players[0].hole)}`);
       game.status = `${players[game.dealer].name} がディーラーボタン。あなたのアクションを待っています。`;
       game.actor = nextSeat(bigBlindSeat, (player) => !player.folded && player.stack > 0);
       game.handActive = true;
@@ -441,8 +483,18 @@
       game.currentBet = 0;
       game.lastRaise = BIG_BLIND;
       game.actor = nextSeat(game.dealer, (player) => !player.folded && player.stack > 0);
-      say(`${STREET_NAMES[game.street]}: コミュニティカードが公開されました。`);
+      logStreet();
       pump();
+    }
+
+    function logStreet() {
+      if (game.street === "flop") {
+        say(`*** FLOP *** ${pokerCards(game.board)}`);
+      } else if (game.street === "turn") {
+        say(`*** TURN *** ${pokerCards(game.board.slice(0, 3))} ${pokerCards(game.board.slice(3))}`);
+      } else if (game.street === "river") {
+        say(`*** RIVER *** ${pokerCards(game.board.slice(0, 4))} ${pokerCards(game.board.slice(4))}`);
+      }
     }
 
     function runOut() {
@@ -450,15 +502,17 @@
         if (game.board.length === 0) {
           drawBoard(3);
           game.street = "flop";
+          logStreet();
         } else {
           drawBoard(1);
           game.street = game.board.length === 4 ? "turn" : "river";
+          logStreet();
         }
       }
       showdown();
     }
 
-    function takeAction(player, action, raiseBy = 0) {
+    function takeAction(player, action, raiseTo = 0) {
       if (!game.handActive || player.index !== game.actor) return;
       const oldBet = game.currentBet;
       const callAmount = Math.min(Math.max(0, oldBet - player.streetBet), player.stack);
@@ -466,23 +520,24 @@
       if (action === "fold") {
         player.folded = true;
         player.acted = true;
-        say(`${player.name} はフォールド。`);
+        say(`${player.name}: folds`);
       } else if (action === "call") {
         const paid = pay(player, callAmount);
         player.acted = true;
-        say(paid === 0 ? `${player.name} はチェック。` : `${player.name} は ${money(paid)} をコール。`);
+        say(paid === 0 ? `${player.name}: checks` : `${player.name}: calls $${pokerMoney(paid)}`);
       } else if (action === "raise") {
-        const increment = Math.floor(raiseBy);
-        const maxIncrement = player.stack - callAmount;
-        if (increment < game.lastRaise || increment > maxIncrement) return;
-        pay(player, callAmount + increment);
+        const targetBet = Math.floor(raiseTo);
+        const increment = targetBet - oldBet;
+        const maxBet = player.streetBet + player.stack;
+        if (increment < game.lastRaise || targetBet > maxBet) return;
+        pay(player, targetBet - player.streetBet);
         player.acted = true;
         game.currentBet = player.streetBet;
         game.lastRaise = game.currentBet - oldBet;
         for (const other of livePlayers()) {
           if (other.index !== player.index && other.stack > 0) other.acted = false;
         }
-        say(`${player.name} は ${money(increment)} レイズ。`);
+        say(`${player.name}: raises $${pokerMoney(increment)} to $${pokerMoney(game.currentBet)}`);
       }
 
       game.awaitingUser = false;
@@ -521,7 +576,7 @@
       const raiseChance = strength > 0.72 ? 0.23 : strength > 0.59 ? 0.08 : 0;
       if (maxRaise >= game.lastRaise && Math.random() < raiseChance) {
         const increment = Math.min(maxRaise, Math.max(game.lastRaise, Math.floor(potSize() * 0.45 / BIG_BLIND) * BIG_BLIND));
-        takeAction(player, "raise", increment);
+        takeAction(player, "raise", game.currentBet + increment);
       } else {
         takeAction(player, "call");
       }
@@ -589,8 +644,8 @@
       }, []);
     }
 
-    function handName(score) {
-      return ["ハイカード", "ワンペア", "ツーペア", "スリーカード", "ストレート", "フラッシュ", "フルハウス", "フォーカード", "ストレートフラッシュ"][score[0]];
+    function pokerHandName(score) {
+      return ["High Card", "One Pair", "Two Pair", "Three of a Kind", "Straight", "Flush", "Full House", "Four of a Kind", "Straight Flush"][score[0]];
     }
 
     function awardUncontested() {
@@ -598,7 +653,10 @@
       if (!winner) return;
       const amount = potSize();
       winner.stack += amount;
-      say(`${winner.name} が ${money(amount)} のポットを獲得。`);
+      say(`${winner.name} collected $${pokerMoney(amount)} from pot`);
+      say("*** SUMMARY ***");
+      say(`Total pot $${pokerMoney(amount)} | Rake $0`);
+      say(`Seat ${winner.index + 1}: ${winner.name} collected ($${pokerMoney(amount)})`);
       game.status = `${winner.name} の勝ち！全員がフォールドしました。`;
       game.handActive = false;
       game.awaitingUser = false;
@@ -642,10 +700,26 @@
       game.revealed = true;
       const summaries = distributePots();
       const winners = [...new Set(summaries.flatMap((summary) => summary.winners))];
-      const text = summaries.map(({ winners: potWinners, amount, name }) =>
-        `${potWinners.map((player) => player.name).join(" / ")} が ${money(amount)}（${name}）`
-      );
-      for (const line of text) say(line);
+      say("*** SHOW DOWN ***");
+      for (const player of livePlayers()) {
+        const score = evaluate([...player.hole, ...game.board]);
+        say(`${player.name}: shows ${pokerCards(player.hole)} (${pokerHandName(score)})`);
+      }
+      for (const { winners: potWinners, amount } of summaries) {
+        for (const winner of potWinners) say(`${winner.name} collected $${pokerMoney(Math.floor(amount / potWinners.length))} from pot`);
+      }
+      say("*** SUMMARY ***");
+      say(`Total pot $${pokerMoney(potSize())} | Rake $0`);
+      say(`Board ${pokerCards(game.board)}`);
+      for (const player of players) {
+        if (player.folded && player.hole.length) {
+          say(`Seat ${player.index + 1}: ${player.name} folded`);
+        } else if (winners.includes(player)) {
+          say(`Seat ${player.index + 1}: ${player.name} collected`);
+        } else if (player.hole.length) {
+          say(`Seat ${player.index + 1}: ${player.name} mucked`);
+        }
+      }
       game.status = winners.length
         ? `ショーダウン: ${winners.map((player) => player.name).join(" / ")} の勝ち！`
         : "ショーダウンが終了しました。";
@@ -670,15 +744,16 @@
         const isTurn = game.handActive && player.index === game.actor;
         const state = player.stack === 0 && player.hole.length ? "オールイン" :
           player.folded && player.hole.length ? "フォールド" :
-          isTurn ? "アクション中" :
-          player.streetBet ? `ベット ${money(player.streetBet)}` : "";
+          isTurn ? "アクション中" : "";
         const reveal = player.user || (game.revealed && !player.folded);
-        const cards = player.hole.length
+        const cards = player.hole.length && !player.folded
           ? player.hole.map((card) => cardMarkup(card, !reveal)).join("")
           : "";
         const dealer = player.index === game.dealer && player.hole.length ? '<span class="dealer-chip">D</span>' : "";
         const classes = ["seat", `seat-${player.index}`, player.user ? "user" : "", isTurn ? "turn" : "", player.folded ? "folded" : ""].filter(Boolean).join(" ");
+        const bet = player.streetBet > 0 ? `<div class="bet-marker bet-${player.index}">$${money(player.streetBet)}</div>` : "";
         return `<div class="${classes}">
+          ${bet}
           <div class="player-name">${player.name}${dealer}</div>
           <div class="player-stack">${money(player.stack)} チップ</div>
           <div class="player-state">${state}</div>
@@ -692,13 +767,15 @@
       const canPlay = game.handActive && game.awaitingUser && game.actor === 0;
       const callAmount = Math.min(Math.max(0, game.currentBet - players[0].streetBet), players[0].stack);
       const maxRaise = players[0].stack - callAmount;
+      const minRaiseTo = game.currentBet + game.lastRaise;
+      const maxRaiseTo = players[0].streetBet + players[0].stack;
       $("fold").disabled = !canPlay;
       $("call").disabled = !canPlay;
       $("call").textContent = callAmount ? `コール ${money(callAmount)}` : "チェック";
-      $("raise-amount").min = String(game.lastRaise);
-      $("raise-amount").max = String(maxRaise);
+      $("raise-amount").min = String(minRaiseTo);
+      $("raise-amount").max = String(maxRaiseTo);
       $("raise-amount").step = String(BIG_BLIND);
-      $("raise-amount").value = String(Math.min(Math.max(game.lastRaise, BIG_BLIND), maxRaise));
+      $("raise-amount").value = String(Math.min(Math.max(minRaiseTo, BIG_BLIND), maxRaiseTo));
       $("raise-amount").disabled = !canPlay || maxRaise < game.lastRaise;
       $("raise").disabled = !canPlay || maxRaise < game.lastRaise;
       $("raise").textContent = `レイズ`;
