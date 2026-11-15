@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#10251d">
-  <title>6max Poker</title>
+  <title>6max Poker (GTO Bot)</title>
   <style>
     :root {
       color-scheme: dark;
@@ -100,6 +100,7 @@
     .seat-4 { right: 12%; top: 10%; }
     .seat-5 { right: 5%; bottom: 22%; }
     .player-name { font-size: .86rem; font-weight: 750; }
+    .player-pos { font-size: .68rem; color: #9ec4a8; margin-left: 4px; font-weight: 600; }
     .player-stack { margin-top: 3px; color: #e7c56e; font-size: .82rem; }
     .player-state { min-height: 17px; margin-top: 3px; color: #c1d0c3; font-size: .72rem; }
     .dealer-chip {
@@ -185,7 +186,7 @@
       background: #0e1e17;
     }
     .hint { margin-top: 10px; color: #9fb3a3; font-size: .78rem; }
-    .log { display: flex; flex-direction: column; gap: 6px; min-height: 60px; color: #c8d5ca; font-size: .78rem; }
+    .log { display: flex; flex-direction: column; gap: 6px; min-height: 60px; max-height: 220px; overflow-y: auto; color: #c8d5ca; font-size: .78rem; }
     .log-title { margin-bottom: 7px; color: #f0dfaa; font-size: .82rem; font-weight: 750; }
 
     @media (max-width: 700px) {
@@ -215,7 +216,7 @@
     <header>
       <div class="brand">
         <h1>6max Poker</h1>
-        <span>あなた vs 5人のBot ・ テキサスホールデム</span>
+        <span>あなた vs 5人のGTO Bot ・ テキサスホールデム</span>
       </div>
       <div class="header-actions">
         <button id="new-hand" class="secondary" type="button">次のハンド</button>
@@ -273,13 +274,14 @@
       { name: "Bot 5" }
     ].map((player, index) => ({
       ...player, index, stack: STARTING_STACK, hole: [], folded: false,
-      streetBet: 0, contribution: 0, acted: false
+      streetBet: 0, contribution: 0, acted: false, position: ""
     }));
 
     const game = {
       deck: [], board: [], dealer: 0, actor: -1, currentBet: 0, lastRaise: BIG_BLIND,
       street: "preflop", handActive: false, awaitingUser: false, revealed: false,
-      handNumber: 0, sequence: 0, messages: [], status: "「ハンドを開始」を押してゲームを始めましょう。"
+      handNumber: 0, sequence: 0, messages: [], status: "「ハンドを開始」を押してゲームを始めましょう。",
+      preflopRaiser: -1, preflopRaiseCount: 0, streetBetCount: 0
     };
 
     const $ = (id) => document.getElementById(id);
@@ -309,7 +311,7 @@
       say(`PokerStars Hand #${game.handNumber}: Hold'em No Limit ($${pokerMoney(SMALL_BLIND)}/$${pokerMoney(BIG_BLIND)}) - ${timestamp}`);
       say(`Table '6max' 6-max Seat #${game.dealer + 1} is the button`);
       for (const player of players) {
-        if (player.hole.length) say(`Seat ${player.index + 1}: ${player.name} ($${pokerMoney(stacks[player.index])} in chips)`);
+        if (player.hole.length) say(`Seat ${player.index + 1}: ${player.name} (${player.position}) ($${pokerMoney(stacks[player.index])} in chips)`);
       }
     }
 
@@ -331,6 +333,25 @@
         if (predicate(candidate)) return candidate.index;
       }
       return -1;
+    }
+
+    function assignPositions() {
+      for (const p of players) p.position = "";
+      const active = [];
+      let cursor = game.dealer;
+      for (let i = 0; i < players.length; i += 1) {
+        if (players[cursor].stack > 0) active.push(players[cursor]);
+        cursor = (cursor + 1) % players.length;
+      }
+      const posNamesMap = {
+        2: ["BTN/SB", "BB"],
+        3: ["BTN", "SB", "BB"],
+        4: ["BTN", "SB", "BB", "CO"],
+        5: ["BTN", "SB", "BB", "UTG", "CO"],
+        6: ["BTN", "SB", "BB", "UTG", "MP", "CO"]
+      };
+      const names = posNamesMap[active.length] || [];
+      active.forEach((p, idx) => { p.position = names[idx] || ""; });
     }
 
     function pay(player, amount) {
@@ -365,6 +386,10 @@
       game.lastRaise = BIG_BLIND;
       game.revealed = false;
       game.awaitingUser = false;
+      game.preflopRaiser = -1;
+      game.preflopRaiseCount = 0;
+      game.streetBetCount = 1;
+
       for (const player of players) {
         player.hole = [];
         player.folded = player.stack === 0;
@@ -374,11 +399,9 @@
       }
 
       if (game.handNumber === 1) game.dealer = 0;
-      else if (players[game.dealer].stack === 0) {
-        game.dealer = nextSeat(game.dealer, (player) => player.stack > 0);
-      } else {
-        game.dealer = nextSeat(game.dealer, (player) => player.stack > 0);
-      }
+      else game.dealer = nextSeat(game.dealer, (player) => player.stack > 0);
+
+      assignPositions();
 
       for (let card = 0; card < 2; card += 1) {
         for (let offset = 1; offset <= players.length; offset += 1) {
@@ -387,8 +410,12 @@
         }
       }
 
-      const smallBlindSeat = nextSeat(game.dealer, (player) => player.stack > 0);
+      const activeCount = funded.length;
+      const smallBlindSeat = activeCount === 2
+        ? game.dealer
+        : nextSeat(game.dealer, (player) => player.stack > 0);
       const bigBlindSeat = nextSeat(smallBlindSeat, (player) => player.stack > 0);
+
       const startingStacks = players.map((player) => player.stack);
       logHandHeader(startingStacks);
       const smallBlindPaid = pay(players[smallBlindSeat], SMALL_BLIND);
@@ -398,7 +425,7 @@
       say(`${players[bigBlindSeat].name}: posts big blind $${pokerMoney(bigBlindPaid)}`);
       say("*** HOLE CARDS ***");
       say(`Dealt to あなた ${pokerCards(players[0].hole)}`);
-      game.status = `${players[game.dealer].name} がディーラーボタン。あなたのアクションを待っています。`;
+      game.status = `${players[game.dealer].name} がディーラーボタン。`;
       game.actor = nextSeat(bigBlindSeat, (player) => !player.folded && player.stack > 0);
       game.handActive = true;
       render();
@@ -458,7 +485,7 @@
       const sequence = game.sequence;
       window.setTimeout(() => {
         if (game.sequence === sequence) botTurn(player);
-      }, 520);
+      }, 480);
     }
 
     function advanceStreet() {
@@ -482,6 +509,7 @@
       }
       game.currentBet = 0;
       game.lastRaise = BIG_BLIND;
+      game.streetBetCount = 0;
       game.actor = nextSeat(game.dealer, (player) => !player.folded && player.stack > 0);
       logStreet();
       pump();
@@ -529,15 +557,23 @@
         const targetBet = Math.floor(raiseTo);
         const increment = targetBet - oldBet;
         const maxBet = player.streetBet + player.stack;
-        if (increment < game.lastRaise || targetBet > maxBet) return;
+        if (increment < game.lastRaise && targetBet < maxBet) return;
+        if (targetBet > maxBet) return;
         pay(player, targetBet - player.streetBet);
         player.acted = true;
         game.currentBet = player.streetBet;
-        game.lastRaise = game.currentBet - oldBet;
+        game.lastRaise = Math.max(game.lastRaise, game.currentBet - oldBet);
+        game.streetBetCount += 1;
+        if (game.street === "preflop") {
+          game.preflopRaiser = player.index;
+          game.preflopRaiseCount += 1;
+        }
         for (const other of livePlayers()) {
           if (other.index !== player.index && other.stack > 0) other.acted = false;
         }
-        say(`${player.name}: raises $${pokerMoney(increment)} to $${pokerMoney(game.currentBet)}`);
+        say(oldBet === 0
+          ? `${player.name}: bets $${pokerMoney(game.currentBet)}`
+          : `${player.name}: raises $${pokerMoney(increment)} to $${pokerMoney(game.currentBet)}`);
       }
 
       game.awaitingUser = false;
@@ -546,41 +582,335 @@
       pump();
     }
 
-    function botStrength(player) {
-      if (game.board.length === 0) {
-        const [first, second] = player.hole;
-        const high = Math.max(first.rank, second.rank);
-        const low = Math.min(first.rank, second.rank);
-        const pairBonus = first.rank === second.rank ? 0.31 + first.rank / 100 : 0;
-        const suitedBonus = first.suit === second.suit ? 0.06 : 0;
-        const connectorBonus = high - low <= 2 ? 0.04 : 0;
-        return Math.min(0.9, 0.17 + high * 0.027 + low * 0.009 + pairBonus + suitedBonus + connectorBonus);
+    // =========================================================================
+    // GTO ロジック実装エリア
+    // =========================================================================
+
+    // Chen Formula ベースの6-maxプリフロップハンド強度スコア (0 ~ 20+)
+    function getPreflopHandScore(hole) {
+      const [c1, c2] = hole;
+      const high = Math.max(c1.rank, c2.rank);
+      const low = Math.min(c1.rank, c2.rank);
+      const suited = c1.suit === c2.suit;
+      const gap = high - low - 1;
+
+      const baseMap = { 14: 10, 13: 8, 12: 7, 11: 6, 10: 5 };
+      let score = baseMap[high] || high / 2;
+
+      if (high === low) {
+        score = Math.max(5, score * 2);
+        if (high === 5) score += 0.5;
+      } else {
+        if (suited) score += 2;
+        if (gap === 1) score -= 1;
+        else if (gap === 2) score -= 2;
+        else if (gap === 3) score -= 4;
+        else if (gap >= 4) score -= 5;
+        if (gap <= 1 && high < 12) score += 1; // コネクターボーナス
       }
-      const score = evaluate([...player.hole, ...game.board]);
-      const categoryStrength = [0.12, 0.39, 0.54, 0.66, 0.72, 0.78, 0.84, 0.91, 0.97][score[0]];
-      return Math.min(0.99, categoryStrength + (score[1] || 0) / 160);
+      return score;
+    }
+
+    // ポジション別のGTOオープン基準（Chenスコア閾値）
+    const OPEN_THRESHOLDS = {
+      "UTG": 9.0,    // 約15-17%レンジ (77+, ATs+, KQs, AJo+, KQo)
+      "MP": 8.0,     // 約20-22%レンジ (66+, A9s+, KJs+, QJs, ATo+, KJo+)
+      "CO": 6.5,     // 約28-30%レンジ (44+, A4s+, K9s+, Q9s+, J9s+, 87s+, A9o+, KTo+, QJo)
+      "BTN": 4.5,    // 約45-48%レンジ (22+, A2s+, K5s+, Q7s+, J7s+, 54s+, A5o+, K9o+, Q9o+, J9o+)
+      "SB": 5.0,     // 約40%レンジ (3BBオープン)
+      "BTN/SB": 4.0  // ヘッズアップ時は超ワイド
+    };
+
+    // ポストフロップのドローおよびボードテクスチャ評価
+    function analyzePostflop(hole, board) {
+      const all = [...hole, ...board];
+      const score = evaluate(all);
+      const category = score[0]; // 0:High, 1:Pair, 2:2Pair, 3:Trips, 4:Str, 5:Flush, 6:FH, 7:Quads, 8:SF
+
+      // ペアの質を判定（トップペア・オーバーペア・ミドル以下）
+      const boardRanks = board.map(c => c.rank).sort((a, b) => b - a);
+      const topBoardRank = boardRanks[0];
+      const holeRanks = hole.map(c => c.rank).sort((a, b) => b - a);
+      const isPocketPair = hole[0].rank === hole[1].rank;
+
+      let pairTier = 0; // 0:なし, 1:アンダー/ボトム, 2:ミドル, 3:トップペア弱キッカー, 4:トップペア強キッカー/オーバーペア
+      if (category === 1) {
+        const pairedRank = score[1];
+        if (isPocketPair && pairedRank > topBoardRank) {
+          pairTier = 4; // オーバーペア
+        } else if (pairedRank === topBoardRank) {
+          const kicker = holeRanks[0] === pairedRank ? holeRanks[1] : holeRanks[0];
+          pairTier = kicker >= 11 ? 4 : 3; // TPTK以上か弱キッカーか
+        } else if (pairedRank >= boardRanks[1]) {
+          pairTier = 2; // セカンドペア
+        } else {
+          pairTier = 1; // ボトム/アンダーペア
+        }
+      }
+
+      // ドロー判定（ターンまで）
+      let flushDraw = false;
+      let backdoorFlush = false;
+      let oesd = false;
+      let gutshot = false;
+      let overcards = 0;
+
+      if (board.length < 5) {
+        // フラッシュドロー判定
+        const suitCounts = [0, 0, 0, 0];
+        for (const c of all) suitCounts[c.suit] += 1;
+        const maxSuit = Math.max(...suitCounts);
+        const holeMatchesSuit = hole.some(c => suitCounts[c.suit] === maxSuit);
+        if (holeMatchesSuit) {
+          if (maxSuit === 4) flushDraw = true;
+          else if (maxSuit === 3 && board.length === 3) backdoorFlush = true;
+        }
+
+        // ストレートドロー判定（アウツ数で判定）
+        const uniqueRanks = [...new Set(all.map(c => c.rank))];
+        if (uniqueRanks.includes(14)) uniqueRanks.push(1);
+        let straightOuts = 0;
+        for (let r = 2; r <= 14; r += 1) {
+          if (!uniqueRanks.includes(r)) {
+            const testRanks = [...uniqueRanks, r];
+            if (straightHigh(testRanks) > 0) straightOuts += 1;
+          }
+        }
+        if (straightOuts >= 2) oesd = true;
+        else if (straightOuts === 1) gutshot = true;
+
+        // オーバーカード
+        overcards = hole.filter(c => c.rank > topBoardRank).length;
+      }
+
+      // ボードのウェットさ（0:ドライ 〜 1:非常にウェット）
+      const boardSuits = new Set(board.map(c => c.suit)).size;
+      const spread = boardRanks[0] - boardRanks[boardRanks.length - 1];
+      let wetness = 0;
+      if (boardSuits <= 2) wetness += 0.4;
+      if (spread <= 4) wetness += 0.4;
+      if (boardRanks[0] <= 11) wetness += 0.2; // ミドルコネクトボード
+
+      return { category, score, pairTier, flushDraw, backdoorFlush, oesd, gutshot, overcards, wetness };
+    }
+
+    function sizeBet(desired, player, minRaiseTo) {
+      const maxBet = player.streetBet + player.stack;
+      const rounded = Math.round(desired / SMALL_BLIND) * SMALL_BLIND;
+      // 残りスタックの75%以上を使う場合はGTO的にオールインへコミット
+      if (rounded >= maxBet * 0.75) return maxBet;
+      return Math.min(maxBet, Math.max(minRaiseTo, rounded));
     }
 
     function botTurn(player) {
       if (!game.handActive || game.actor !== player.index) return;
+
       const toCall = Math.max(0, game.currentBet - player.streetBet);
       const callAmount = Math.min(toCall, player.stack);
-      const strength = botStrength(player);
-      const potOdds = callAmount / Math.max(1, potSize() + callAmount);
-      if (toCall > 0 && strength + Math.random() * 0.14 < Math.max(0.16, potOdds * 1.18)) {
-        takeAction(player, "fold");
+      const pot = potSize();
+      const minRaiseTo = game.currentBet + game.lastRaise;
+      const maxBet = player.streetBet + player.stack;
+      const canRaise = maxBet >= minRaiseTo;
+      const rng = Math.random();
+
+      // -----------------------------------------------------------------------
+      // 1. プリフロップ GTO 戦略
+      // -----------------------------------------------------------------------
+      if (game.street === "preflop") {
+        const chen = getPreflopHandScore(player.hole);
+        const [c1, c2] = player.hole;
+        const suited = c1.suit === c2.suit;
+        const high = Math.max(c1.rank, c2.rank);
+        const low = Math.min(c1.rank, c2.rank);
+        const isAxSuited = suited && high === 14;
+        const isSuitedConnector = suited && (high - low === 1) && low >= 5;
+
+        // ケースA: 未オープンポット（まだ誰もレイズしていない）
+        if (game.preflopRaiseCount === 0) {
+          // BBでチェックできる場合
+          if (toCall === 0) {
+            // プレミアム〜強いハンドはアイソレート/レイズ、それ以外はチェック
+            if (canRaise && (chen >= 8.5 || (chen >= 7.0 && rng < 0.4))) {
+              takeAction(player, "raise", sizeBet(BIG_BLIND * 3, player, minRaiseTo));
+            } else {
+              takeAction(player, "call");
+            }
+            return;
+          }
+
+          // オープンレイズ判定（リンプせずレイズ or フォールド）
+          const threshold = OPEN_THRESHOLDS[player.position] ?? 7.5;
+          // 境界線上のハンドはミックス戦略（頻度調整）
+          if (chen >= threshold || (chen >= threshold - 0.7 && rng < 0.35)) {
+            if (canRaise) {
+              const openSize = player.position === "SB" ? BIG_BLIND * 3 : BIG_BLIND * 2.5;
+              takeAction(player, "raise", sizeBet(openSize, player, minRaiseTo));
+            } else {
+              takeAction(player, "call");
+            }
+          } else {
+            takeAction(player, "fold");
+          }
+          return;
+        }
+
+        // ケースB: オープンレイズに直面（2-Betポットでのアクション）
+        if (game.preflopRaiseCount === 1) {
+          const isBB = player.position === "BB";
+          const isIP = ["BTN", "CO"].includes(player.position);
+
+          // バリュー3-Betレンジ: QQ+, AK (Chen >= 11.5) + JJ/AQsの一部
+          const isValue3Bet = chen >= 11.5 || (chen >= 10.0 && rng < 0.5);
+          // ブラフ3-Betレンジ（ポラライズ）: A5s-A2s, KTs, QJs, スーテッドコネクターの一部
+          const isBluff3Bet = (isAxSuited && low <= 5 && rng < 0.55) ||
+                              (isSuitedConnector && low >= 7 && rng < 0.35);
+
+          if (canRaise && (isValue3Bet || isBluff3Bet)) {
+            const threeBetMultiplier = isIP ? 3.0 : 3.8; // OOPは大きめに3-Bet
+            takeAction(player, "raise", sizeBet(game.currentBet * threeBetMultiplier, player, minRaiseTo));
+            return;
+          }
+
+          // コールディフェンス判定（BBはオッズが良いため広くディフェンス）
+          const callThreshold = isBB ? 5.2 : (isIP ? 7.2 : 8.2);
+          const potOdds = callAmount / (pot + callAmount);
+          if (potOdds <= 0.38 && (chen >= callThreshold || (isBB && (suited || high >= 11) && chen >= 4.2))) {
+            takeAction(player, "call");
+          } else {
+            takeAction(player, "fold");
+          }
+          return;
+        }
+
+        // ケースC: 3-Bet / 4-Bet以上に直面
+        if (game.preflopRaiseCount >= 2) {
+          // 4-Bet / オールインレンジ: KK+, AKs (Chen >= 13.5) + A5sブロッカーブラフ一部
+          const isValue4Bet = chen >= 13.5 || (chen >= 12.0 && rng < 0.45);
+          const isBluff4Bet = isAxSuited && low === 5 && game.preflopRaiseCount === 2 && rng < 0.25;
+
+          if (canRaise && (isValue4Bet || isBluff4Bet)) {
+            takeAction(player, "raise", sizeBet(game.currentBet * 2.4, player, minRaiseTo));
+            return;
+          }
+
+          // 3-Betに対するコール（JJ-QQ, AQs, KQs, 一部のTT/AJs）
+          if (chen >= 9.5 && callAmount <= player.stack * 0.25) {
+            takeAction(player, "call");
+          } else {
+            takeAction(player, "fold");
+          }
+          return;
+        }
+      }
+
+      // -----------------------------------------------------------------------
+      // 2. ポストフロップ GTO 戦略
+      // -----------------------------------------------------------------------
+      const info = analyzePostflop(player.hole, game.board);
+      const isPFA = game.preflopRaiser === player.index; // プリフロップアグレッサーか
+      const isIP = player.index === game.dealer || nextSeat(player.index, p => !p.folded) === game.dealer;
+
+      // 実質ハンド強度スコア (0.0 〜 1.0)
+      let equity = 0.05;
+      if (info.category >= 3) equity = 0.88 + info.category * 0.02;      // スリーカード以上（モンスター）
+      else if (info.category === 2) equity = 0.80;                       // ツーペア
+      else if (info.category === 1) {
+        equity = [0, 0.36, 0.50, 0.64, 0.74][info.pairTier];
+      } else {
+        // ハイカード時のドローエクイティ加算
+        if (info.flushDraw && info.oesd) equity = 0.54;                  // コンボドロー
+        else if (info.flushDraw) equity = game.street === "flop" ? 0.36 : 0.20;
+        else if (info.oesd) equity = game.street === "flop" ? 0.32 : 0.17;
+        else if (info.gutshot) equity = 0.16;
+        else if (info.overcards === 2 && info.backdoorFlush) equity = 0.22;
+        else if (info.overcards >= 1) equity = 0.12;
+      }
+
+      // -----------------------------------------------------------------------
+      // ケースA: まだベットが入っていない（チェック or ベット）
+      // -----------------------------------------------------------------------
+      if (toCall === 0) {
+        // バリューベット候補（トップペア強キッカー以上、リバーはツーペア/TPTK中心）
+        const wantValueBet = (game.street === "river")
+          ? (info.category >= 2 || (info.pairTier === 4 && rng < 0.75))
+          : (info.category >= 2 || info.pairTier >= 3);
+
+        // セミブラフ / ピュアブラフ候補（ポラライズ戦略）
+        const hasStrongDraw = info.flushDraw || info.oesd;
+        const hasWeakDraw = info.gutshot || (info.backdoorFlush && info.overcards >= 1);
+
+        let shouldBet = false;
+        let betFraction = 0.5;
+
+        if (wantValueBet) {
+          // ウェットボードではプロテクションのため高頻度ベット、ドライではスロープレイも混ぜる
+          shouldBet = info.wetness > 0.4 ? rng < 0.88 : rng < 0.72;
+          betFraction = info.wetness > 0.4 ? 0.66 : 0.33;
+        } else if (hasStrongDraw) {
+          // セミブラフ（バリューとバランスを取る）
+          shouldBet = rng < 0.68;
+          betFraction = 0.66;
+        } else if (isPFA && game.street === "flop" && info.wetness <= 0.4 && rng < 0.55) {
+          // ドライボードでのレンジ全体Cベット（安め33%ポット）
+          shouldBet = true;
+          betFraction = 0.33;
+        } else if (hasWeakDraw && isIP && rng < 0.30) {
+          shouldBet = true;
+          betFraction = 0.50;
+        } else if (game.street === "river" && info.category === 0 && rng < 0.22) {
+          // リバーでのポラライズされたピュアブラフ（ブロッカー重視）
+          shouldBet = true;
+          betFraction = 0.75;
+        }
+
+        if (shouldBet && canRaise) {
+          const desiredBet = Math.max(BIG_BLIND, pot * betFraction);
+          takeAction(player, "raise", sizeBet(desiredBet, player, minRaiseTo));
+        } else {
+          takeAction(player, "call"); // チェック
+        }
         return;
       }
 
-      const maxRaise = player.stack - callAmount;
-      const raiseChance = strength > 0.72 ? 0.23 : strength > 0.59 ? 0.08 : 0;
-      if (maxRaise >= game.lastRaise && Math.random() < raiseChance) {
-        const increment = Math.min(maxRaise, Math.max(game.lastRaise, Math.floor(potSize() * 0.45 / BIG_BLIND) * BIG_BLIND));
-        takeAction(player, "raise", game.currentBet + increment);
-      } else {
+      // -----------------------------------------------------------------------
+      // ケースB: ベットまたはレイズに直面（フォールド / コール / レイズ）
+      // -----------------------------------------------------------------------
+      const potOdds = callAmount / (pot + callAmount);
+      // MDF (Minimum Defense Frequency) = Pot / (Pot + Bet)
+      const mdf = pot / (pot + callAmount);
+
+      // レイズ（チェックレイズ / リレイズ）の判定：ポラライズされた強い手＋コンボドロー
+      const isMonster = info.category >= 2 || (info.pairTier === 4 && game.street === "flop" && rng < 0.25);
+      const isComboSemiBluff = (info.flushDraw && (info.oesd || info.gutshot || info.overcards === 2)) ||
+                               ((info.flushDraw || info.oesd) && game.street === "flop" && rng < 0.22);
+
+      if (canRaise && game.streetBetCount <= 2 && (isMonster || isComboSemiBluff)) {
+        // モンスターでも100%レイズせず、一部はコールでトラップを残す
+        if (rng < 0.75) {
+          const raiseTarget = game.currentBet * 2.7 + pot * 0.35;
+          takeAction(player, "raise", sizeBet(raiseTarget, player, minRaiseTo));
+          return;
+        }
+      }
+
+      // コール判定：ポットオッズ + インプライドオッズ（ドロー時） + MDF防衛ライン
+      const impliedBonus = (info.flushDraw || info.oesd) && game.street !== "river" ? 0.08 : 0;
+      const effectiveEquity = equity + impliedBonus;
+
+      // 相手のベットサイズに応じたディフェンス閾値
+      if (effectiveEquity >= potOdds) {
         takeAction(player, "call");
+      } else if (mdf > 0.65 && info.pairTier >= 1 && game.street === "flop" && rng < 0.5) {
+        // 小さいベット（33%ポット以下）に対してはMDFを満たすためボトムペア等でもディフェンス
+        takeAction(player, "call");
+      } else {
+        takeAction(player, "fold");
       }
     }
+
+    // =========================================================================
+    // 役判定・ショーダウン・UI描画
+    // =========================================================================
 
     function combinations(cards, count) {
       const result = [];
@@ -688,7 +1018,7 @@
           winnings.set(cursor, winnings.get(cursor) + 1);
           remainder -= 1;
         }
-        summaries.push({ winners, amount, name: handName(best) });
+        summaries.push({ winners, amount, name: pokerHandName(best) });
       }
 
       for (const player of players) player.stack += winnings.get(player.index);
@@ -750,17 +1080,22 @@
           ? player.hole.map((card) => cardMarkup(card, !reveal)).join("")
           : "";
         const dealer = player.index === game.dealer && player.hole.length ? '<span class="dealer-chip">D</span>' : "";
+        const posLabel = player.position ? `<span class="player-pos">${player.position}</span>` : "";
         const classes = ["seat", `seat-${player.index}`, player.user ? "user" : "", isTurn ? "turn" : "", player.folded ? "folded" : ""].filter(Boolean).join(" ");
         const bet = player.streetBet > 0 ? `<div class="bet-marker bet-${player.index}">$${money(player.streetBet)}</div>` : "";
         return `<div class="${classes}">
           ${bet}
-          <div class="player-name">${player.name}${dealer}</div>
+          <div class="player-name">${player.name}${posLabel}${dealer}</div>
           <div class="player-stack">${money(player.stack)} チップ</div>
           <div class="player-state">${state}</div>
           <div class="hole-cards">${cards}</div>
         </div>`;
       }).join("");
-      $("log").innerHTML = game.messages.map((message) => `<div>${message}</div>`).join("");
+
+      const logEl = $("log");
+      logEl.innerHTML = game.messages.map((message) => `<div>${message}</div>`).join("");
+      logEl.scrollTop = logEl.scrollHeight;
+
       $("new-hand").disabled = game.handActive;
       $("new-hand").textContent = players[0].stack <= 0 ? "チップ切れ" : game.handNumber ? "次のハンド" : "ハンドを開始";
 
@@ -772,13 +1107,13 @@
       $("fold").disabled = !canPlay;
       $("call").disabled = !canPlay;
       $("call").textContent = callAmount ? `コール ${money(callAmount)}` : "チェック";
-      $("raise-amount").min = String(minRaiseTo);
+      $("raise-amount").min = String(Math.min(minRaiseTo, maxRaiseTo));
       $("raise-amount").max = String(maxRaiseTo);
-      $("raise-amount").step = String(BIG_BLIND);
+      $("raise-amount").step = String(SMALL_BLIND);
       $("raise-amount").value = String(Math.min(Math.max(minRaiseTo, BIG_BLIND), maxRaiseTo));
-      $("raise-amount").disabled = !canPlay || maxRaise < game.lastRaise;
-      $("raise").disabled = !canPlay || maxRaise < game.lastRaise;
-      $("raise").textContent = `レイズ`;
+      $("raise-amount").disabled = !canPlay || maxRaise <= 0;
+      $("raise").disabled = !canPlay || maxRaise <= 0;
+      $("raise").textContent = game.currentBet === 0 ? "ベット" : "レイズ";
     }
 
     $("new-hand").addEventListener("click", startHand);
